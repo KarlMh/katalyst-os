@@ -24,6 +24,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
 
+    // Auto-load snapshot at boot (I/O path hardened)
+    if blog_os::fs::persist::load_from_disk().is_ok() {
+        blog_os::println!("[fs] loaded snapshot");
+    } else {
+        blog_os::println!("[fs] no snapshot");
+    }
+
     let mut executor = Executor::new();
     executor.spawn(Task::new(katalyst_repl()));
     executor.run();

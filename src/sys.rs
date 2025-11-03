@@ -1,7 +1,12 @@
 use core::sync::atomic::{AtomicU64, Ordering};
 use x86_64::instructions::port::Port;
 use crate::println;
+use crate::fs::persist::save_to_disk;
 use crate::task::executor::EXECUTOR;
+use crate::fs::storage::ROOT_DIR;
+use crate::fs::persist::{LAST_SNAPSHOT_TICKS, LAST_SNAPSHOT_BYTES};
+use crate::block::ata::ata_present;
+use crate::fs::dir::Directory;
 use alloc::format;
 
 /// Total ticks since boot
@@ -21,7 +26,10 @@ pub fn spark(term: &mut Terminal) {
 }
 
 pub fn halt(term: &mut Terminal) -> ! {
-
+    match save_to_disk() {
+        Ok(()) => term.write_str("Auto-saved.\n"),
+        Err(()) => term.write_str("Auto-save failed.\n"),
+    }
     term.write_str("System halted.\n");
 
     loop {
@@ -72,6 +80,10 @@ pub fn get_cpu_temperature() -> u8 {
 
 /// Reboot the system via the keyboard controller
 pub fn reboot(term: &mut Terminal) -> ! {
+    match save_to_disk() {
+        Ok(()) => term.write_str("Auto-saved.\n"),
+        Err(()) => term.write_str("Auto-save failed.\n"),
+    }
     term.write_str("System rebooting...\n");
     unsafe {
         let mut port = Port::new(0x64);
@@ -91,11 +103,42 @@ pub fn core_report(term: &mut Terminal) {
     let cpu_usage = get_cpu_usage();
     let cpu_temp = get_cpu_temperature();
     let (hours, mins, secs) = get_uptime();
+    let snapshot_age_secs = {
+        let last = LAST_SNAPSHOT_TICKS.load(Ordering::Relaxed);
+        let now = UPTIME_TICKS.load(Ordering::Relaxed);
+        now.saturating_sub(last) / TICKS_PER_SECOND
+    };
+    let snapshot_bytes = LAST_SNAPSHOT_BYTES.load(Ordering::Relaxed);
+
+    // FS stats
+    fn walk(dir: &Directory) -> (u64, u64, u64) {
+        let mut dirs = 1u64; // count self
+        let mut files = 0u64;
+        let mut bytes = 0u64;
+        for (_n, f) in dir.files.iter() {
+            files += 1;
+            bytes += f.content.len() as u64;
+        }
+        for (_n, d) in dir.subdirs.iter() {
+            let (cd, cf, cb) = walk(d);
+            dirs += cd;
+            files += cf;
+            bytes += cb;
+        }
+        (dirs, files, bytes)
+    }
+    let (dirs, files, bytes) = {
+        let root = ROOT_DIR.lock();
+        walk(&root)
+    };
 
     term.write_str("=== Core System Report ===\n");
     term.write_str(&format!("Uptime: {:02}:{:02}:{:02}\n", hours, mins, secs));
     term.write_str(&format!("CPU Usage: {}%\n", cpu_usage));
     term.write_str(&format!("CPU Temperature: {}°C\n", cpu_temp));
+    term.write_str(&format!("Disk: {}\n", if ata_present() { "attached" } else { "not detected" }));
+    term.write_str(&format!("Snapshot: {} bytes, age: {}s\n", snapshot_bytes, snapshot_age_secs));
+    term.write_str(&format!("FS: {} dirs, {} files, {} bytes\n", dirs, files, bytes));
     term.write_str("Active Tasks:\n");
 
     let exec = EXECUTOR.lock();

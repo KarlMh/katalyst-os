@@ -104,3 +104,82 @@ pub fn scan_files(term: &mut Terminal, root: &Directory, cwd_path: &[&str], path
 
     term.write_char('\n');
 }
+
+/// Create a new file or folder based on name
+pub fn make_file(term: &mut Terminal, parent_dir: &mut Directory, name: &str) {
+    if name.is_empty() { term.write_str("Name cannot be empty!\n"); return; }
+    if name.contains('.') {
+        let file = File::new(name);
+        parent_dir.add_file(file);
+        term.write_str(&format!("Created file '{}'\n", name));
+    } else {
+        let static_name: &'static str = Box::leak(name.to_string().into_boxed_str());
+        let dir = Directory::new(static_name);
+        parent_dir.add_subdir(dir);
+        term.write_str(&format!("Created folder '{}'\n", name));
+    }
+}
+
+/// Print file contents (utf8 best-effort) or list a directory; if name is None, list cwd
+pub fn peek_path(term: &mut Terminal, cwd: &Directory, name: Option<&str>) {
+    match name {
+        Some(n) => {
+            if let Some(f) = cwd.files.get(n) {
+                match core::str::from_utf8(&f.content) {
+                    Ok(s) => { term.write_str(s); term.write_char('\n'); }
+                    Err(_) => term.write_str("<binary>\n"),
+                }
+            } else if let Some(d) = cwd.subdirs.get(n) {
+                // Show files and subdirs of the subdir, mark dirs with '/'
+                for sub in d.list_subdirs().iter() { term.write_str(&format!("{}/\n", sub)); }
+                for file in d.list_files().iter() { term.write_str(file); term.write_char('\n'); }
+            } else { term.write_str("Not found\n"); }
+        }
+        None => {
+            // List current dir
+            for sub in cwd.list_subdirs().iter() { term.write_str(&format!("{}/\n", sub)); }
+            for file in cwd.list_files().iter() { term.write_str(file); term.write_char('\n'); }
+        }
+    }
+}
+
+/// Clear file content
+pub fn void_file(term: &mut Terminal, parent_dir: &mut Directory, name: &str) {
+    if let Some(file) = parent_dir.files.get_mut(name) {
+        file.content.clear();
+        term.write_str("Cleared\n");
+    } else { term.write_str("File not found\n"); }
+}
+
+/// Overwrite file with bytes; creates if missing
+pub fn write_file(term: &mut Terminal, parent_dir: &mut Directory, name: &str, bytes: &[u8]) {
+    if !parent_dir.files.contains_key(name) {
+        let f = File::new(name);
+        let key: &'static str = Box::leak(name.to_string().into_boxed_str());
+        parent_dir.files.insert(key, f);
+    }
+    if let Some(file) = parent_dir.files.get_mut(name) {
+        file.content.clear();
+        file.content.extend_from_slice(bytes);
+        term.write_str("Saved.\n");
+    }
+}
+
+/// Simple subslice search (naive)
+pub fn find_subslice(hay: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() { return true; }
+    if needle.len() > hay.len() { return false; }
+    for i in 0..=hay.len()-needle.len() {
+        if &hay[i..i+needle.len()] == needle { return true; }
+    }
+    false
+}
+
+/// Search all files in cwd for pattern; print filenames that match
+pub fn seek_in_cwd(term: &mut Terminal, cwd: &Directory, pattern: &[u8]) {
+    for (name, f) in cwd.files.iter() {
+        if find_subslice(&f.content, pattern) {
+            term.write_str(&format!("{}\n", name));
+        }
+    }
+}

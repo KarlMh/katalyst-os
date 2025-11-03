@@ -18,6 +18,7 @@ pub mod vga_buffer;
 pub mod repl;  // <- add repl module
 pub mod sys;
 pub mod fs;
+pub mod block;
 
 
 use crate::sys::IDLE_TICKS;

@@ -4,13 +4,15 @@ use alloc::{string::String, vec::Vec};
 use core::fmt::Write;
 
 use crate::task::keyboard::ScancodeStream;
-use pc_keyboard::{DecodedKey, Keyboard, ScancodeSet1, layouts, HandleControl};
+use pc_keyboard::{DecodedKey, Keyboard, ScancodeSet1, layouts, HandleControl, KeyCode};
 use futures_util::stream::StreamExt;
 
-use crate::fs::commands::{spawn_file_folder, despawn_file_folder, scan_files};
+use crate::fs::commands::{despawn_file_folder, make_file, peek_path, void_file, write_file, seek_in_cwd};
+use crate::fs::persist::{save_to_disk, load_from_disk};
+use crate::sys::{UPTIME_TICKS, TICKS_PER_SECOND};
 use crate::fs::storage::ROOT_DIR;
 use crate::fs::dir::Directory;
-use crate::fs::file::File;
+// use crate::fs::file::File;
 
 use crate::alloc::string::ToString;
 
@@ -26,6 +28,8 @@ pub struct Terminal {
     cursor_y: usize,
     input: String,
     prompt: String,
+    history: Vec<String>,
+    hist_pos: Option<usize>,
 }
 
 impl Terminal {
@@ -35,6 +39,8 @@ impl Terminal {
             cursor_y: 0,
             input: String::new(),
             prompt: prompt.to_string(),
+            history: Vec::new(),
+            hist_pos: None,
         }
     }
 
@@ -132,6 +138,41 @@ impl Terminal {
         &self.input
     }
 
+    fn set_input(&mut self, s: &str) {
+        self.input.clear();
+        self.input.push_str(s);
+        self.redraw_input();
+    }
+
+    fn history_push(&mut self, s: &str) {
+        if !s.is_empty() {
+            self.history.push(s.to_string());
+        }
+        self.hist_pos = None;
+    }
+
+    fn history_prev(&mut self) {
+        if self.history.is_empty() { return; }
+        let idx = match self.hist_pos { Some(i) => i.saturating_sub(1), None => self.history.len().saturating_sub(1) };
+        let line = self.history[idx].clone();
+        self.hist_pos = Some(idx);
+        self.set_input(&line);
+    }
+
+    fn history_next(&mut self) {
+        if self.history.is_empty() { return; }
+        if let Some(i) = self.hist_pos {
+            if i + 1 < self.history.len() {
+                let line = self.history[i + 1].clone();
+                self.hist_pos = Some(i + 1);
+                self.set_input(&line);
+            } else {
+                self.hist_pos = None;
+                self.set_input("");
+            }
+        }
+    }
+
     fn scroll_up(&mut self) {
         unsafe {
             for y in 1..HEIGHT {
@@ -163,11 +204,22 @@ pub async fn katalyst_repl() {
     term.write_str("a simple OS kernel, made by kewl.\n\n");
 
     let mut cwd_path: Vec<&'static str> = vec!["main"];
+    let mut last_autosave_ticks: u64 = 0;
 
     loop {
         term.clear_input();
         update_prompt(&mut term, &cwd_path);
         term.move_cursor();
+
+        // Periodic autosave (~every 10 seconds)
+        let now = UPTIME_TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last_autosave_ticks) >= 10 * TICKS_PER_SECOND {
+            match save_to_disk() {
+                Ok(()) => term.write_str("[auto] saved\n"),
+                Err(()) => term.write_str("[auto] save failed\n"),
+            }
+            last_autosave_ticks = now;
+        }
 
         // Read input
         loop {
@@ -177,10 +229,15 @@ pub async fn katalyst_repl() {
                         match key {
                             DecodedKey::Unicode(c) => match c {
                                 '\n' | '\r' => { term.cursor_x = 0; term.cursor_y += 1; term.move_cursor(); break; }
+                                '\t' => autocomplete(&mut term, &cwd_path),
                                 '\x08' => term.pop(),
                                 _ => term.push(c),
                             },
-                            DecodedKey::RawKey(_) => {}
+                            DecodedKey::RawKey(code) => match code {
+                                KeyCode::ArrowUp => term.history_prev(),
+                                KeyCode::ArrowDown => term.history_next(),
+                                _ => {}
+                            }
                         }
                     }
                 }
@@ -188,6 +245,7 @@ pub async fn katalyst_repl() {
         }
 
         let input = term.get_input().trim().to_string();
+        term.history_push(&input);
         let mut parts = input.split_whitespace();
         let command = parts.next().unwrap_or("");
         let arg = parts.next();
@@ -195,10 +253,11 @@ pub async fn katalyst_repl() {
         match command {
             "help" => {
                 // All lines are &'static str
-                let help_text: [&'static str; 3] = [
-                    "System commands: core, halt, reboot, spark",
-                    "File commands: make file/folder, del file/folder, peek folder, move source -> dest",
-                    "Other file commands: push filename content, pull filename, link source dest, clone source dest",
+                let help_text: [&'static str; 4] = [
+                    "System: core, halt, reboot, spark, save, load",
+                    "Navigation: here, -> <dir>, <-",
+                    "Files: make <name>, del <name>, peek [file|dir], void <file>",
+                    "Edit/search: scribe <file>, seek <pattern>",
                 ];
 
                 // Print each line followed by a newline
@@ -213,6 +272,19 @@ pub async fn katalyst_repl() {
             "reboot" => crate::sys::reboot(&mut term),
             "spark" => crate::sys::spark(&mut term),
             "core" => crate::sys::core_report(&mut term),
+            "save" => {
+                term.write_str("Saving...\n");
+                match save_to_disk() {
+                    Ok(()) => term.write_str("Saved to disk\n"),
+                    Err(()) => term.write_str("Save failed\n"),
+                }
+            }
+            "load" => {
+                match load_from_disk() {
+                    Ok(()) => term.write_str("Loaded from disk\n"),
+                    Err(()) => term.write_str("Load failed\n"),
+                }
+            }
             "here" => {
                 term.write_str(&format!("Current directory: {}\n", cwd_path.join("/")));
             }
@@ -221,7 +293,7 @@ pub async fn katalyst_repl() {
                 if let Some(folder) = arg {
                     let mut root = ROOT_DIR.lock();
                     let cwd = resolve_cwd_mut(&mut root, &cwd_path);
-                    spawn_file_folder(&mut term, cwd, folder);
+                    make_file(&mut term, cwd, folder);
                 } else { term.write_str("Invalid spawn syntax. Use: spawn foldername\n"); }
             }
 
@@ -235,7 +307,34 @@ pub async fn katalyst_repl() {
 
             "peek" => {
                 let root_ref = ROOT_DIR.lock();
-                scan_files(&mut term, &root_ref, &cwd_path, arg);
+                let cwd = resolve_cwd(&root_ref, &cwd_path);
+                peek_path(&mut term, cwd, arg);
+            }
+
+            "void" => {
+                if let Some(name) = arg {
+                    let mut root = ROOT_DIR.lock();
+                    let cwd = resolve_cwd_mut(&mut root, &cwd_path);
+                    void_file(&mut term, cwd, name);
+                } else { term.write_str("Usage: void <file>\n"); }
+            }
+
+            "scribe" => {
+                if let Some(name) = arg {
+                    term.write_str("Enter text. End with a single line '::end'\n");
+                    let content = read_multiline(&mut term, &mut scancodes, &mut keyboard).await;
+                    let mut root = ROOT_DIR.lock();
+                    let cwd = resolve_cwd_mut(&mut root, &cwd_path);
+                    write_file(&mut term, cwd, name, content.as_bytes());
+                } else { term.write_str("Usage: scribe <file>\n"); }
+            }
+
+            "seek" => {
+                if let Some(pattern) = arg {
+                    let root_ref = ROOT_DIR.lock();
+                    let cwd = resolve_cwd(&root_ref, &cwd_path);
+                    seek_in_cwd(&mut term, cwd, pattern.as_bytes());
+                } else { term.write_str("Usage: seek <pattern>\n"); }
             }
 
 
@@ -247,32 +346,23 @@ pub async fn katalyst_repl() {
                     let root = ROOT_DIR.lock();
                     let mut temp = &*root;
                     let mut path_stack = vec![temp.name];
-
-                    if target.starts_with('/') {
-                        // Absolute path
-                        let parts: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
-                        let mut success = true;
-                        for part in parts.iter() {
-                            if let Some(child) = temp.subdirs.get(part) {
-                                temp = child;
-                                path_stack.push(child.name);
-                            } else {
-                                term.write_str(&format!("Directory '{}' not found\n", part));
-                                success = false;
-                                break;
-                            }
-                        }
-                        if success { cwd_path = path_stack; }
-                    } else {
-                        // Relative path
-                        for part in cwd_path.iter().skip(1) { temp = temp.subdirs.get(part).unwrap(); }
-
-                        if let Some(child) = temp.subdirs.get(target) {
-                            cwd_path.push(child.name);
+                    let trimmed = target.trim_start_matches([' ', '/'].as_ref());
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    let parts: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
+                    let mut success = true;
+                    for part in parts.iter() {
+                        if let Some(child) = temp.subdirs.get(part) {
+                            temp = child;
+                            path_stack.push(child.name);
                         } else {
-                            term.write_str(&format!("Directory '{}' not found\n", target));
+                            term.write_str(&format!("Directory '{}' not found\n", part));
+                            success = false;
+                            break;
                         }
                     }
+                    if success { cwd_path = path_stack; }
                 } else {
                     term.write_str("Usage: -> <dir>\n");
                 }
@@ -312,4 +402,60 @@ fn resolve_cwd_mut<'a>(root: &'a mut Directory, cwd_path: &[&'static str]) -> &'
 fn update_prompt(term: &mut Terminal, cwd_path: &[&str]) {
     term.prompt = format!("katalyst@{}=> ", cwd_path.join("/"));
     term.redraw_input(); // redraws prompt + current input
+}
+
+// Simple autocomplete: complete last token from command/file/dir names
+fn autocomplete(term: &mut Terminal, cwd_path: &[&'static str]) {
+    let input = term.get_input().to_string();
+    let parts: Vec<&str> = input.split_whitespace().collect();
+    let (prefix, token) = if let Some(last) = parts.last() {
+        let start = input.rfind(last).unwrap_or(0);
+        (input[..start].to_string(), (*last).to_string())
+    } else {
+        (String::new(), String::new())
+    };
+
+    let mut candidates: Vec<String> = Vec::new();
+    // commands
+    let cmds = ["help","halt","reboot","spark","core","save","load","here","make","del","peek","void","scribe","seek","->","<-"];
+    for c in cmds.iter() { if c.starts_with(&token) { candidates.push((*c).to_string()); } }
+    // files/dirs in cwd
+    let root = ROOT_DIR.lock();
+    let cwd = resolve_cwd(&root, cwd_path);
+    for (name, _) in cwd.files.iter() { if name.starts_with(&token) { candidates.push((*name).to_string()); } }
+    for (name, _) in cwd.subdirs.iter() { if name.starts_with(&token) { candidates.push((*name).to_string()); } }
+
+    if candidates.len() == 1 {
+        let completed = &candidates[0];
+        let sep = if prefix.is_empty() { "" } else { " " };
+        term.set_input(&format!("{}{}{}", prefix.trim_end(), sep, completed));
+    }
+}
+
+// Read lines until '::end' line
+async fn read_multiline(term: &mut Terminal, scancodes: &mut ScancodeStream, keyboard: &mut Keyboard<layouts::Us104Key, ScancodeSet1>) -> String {
+    let mut out = String::new();
+    loop {
+        let mut line = String::new();
+        loop {
+            if let Some(sc) = scancodes.next().await {
+                if let Ok(Some(ev)) = keyboard.add_byte(sc) {
+                    if let Some(key) = keyboard.process_keyevent(ev) {
+                        match key {
+                            DecodedKey::Unicode(c) => match c {
+                                '\n' | '\r' => { term.write_char('\n'); break; }
+                                '\x08' => { let _ = line.pop(); /* no redraw for simplicity */ },
+                                _ => { line.push(c); term.write_char(c); }
+                            },
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        if line.trim() == "::end" { break; }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
 }
