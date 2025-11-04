@@ -19,6 +19,8 @@ pub mod repl;  // <- add repl module
 pub mod sys;
 pub mod fs;
 pub mod block;
+pub mod scribe;
+pub mod terminal;
 
 
 use crate::sys::IDLE_TICKS;

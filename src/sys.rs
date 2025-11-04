@@ -18,7 +18,7 @@ pub static IDLE_TICKS: AtomicU64 = AtomicU64::new(0);
 /// Timer frequency: how many times the timer fires per second
 pub const TICKS_PER_SECOND: u64 = 1000;
 
-use crate::repl::Terminal;
+use crate::terminal::Terminal;
 
 
 pub fn spark(term: &mut Terminal) {

@@ -1,7 +1,7 @@
 use super::storage::{ROOT_DIR};
 use super::file::File;
 use super::dir::Directory;
-use crate::repl::Terminal;
+use crate::terminal::Terminal;
 use crate::alloc::string::ToString;
 
 use alloc::{boxed::Box, format, string::String, vec, vec::Vec};
@@ -161,7 +161,6 @@ pub fn write_file(term: &mut Terminal, parent_dir: &mut Directory, name: &str, b
     if let Some(file) = parent_dir.files.get_mut(name) {
         file.content.clear();
         file.content.extend_from_slice(bytes);
-        term.write_str("Saved.\n");
     }
 }
 
