@@ -24,9 +24,10 @@ const WIDTH: usize = 80;
 const HEIGHT: usize = 25;
 
 pub struct Terminal {
-    cursor_x: usize,
-    cursor_y: usize,
-    input: String,
+    cursor_x: usize,  // VGA col
+    cursor_y: usize,  // VGA row
+    input: String,    // complete text input content
+    input_cursor: usize, // input cursor pos (bytes, NOT screen pos)
     prompt: String,
     history: Vec<String>,
     hist_pos: Option<usize>,
@@ -38,6 +39,7 @@ impl Terminal {
             cursor_x: 0,
             cursor_y: 0,
             input: String::new(),
+            input_cursor: 0,
             prompt: prompt.to_string(),
             history: Vec::new(),
             hist_pos: None,
@@ -100,8 +102,11 @@ impl Terminal {
         }
     }
 
+    /// redraw the prompt+input, with cursor placed at current input_cursor
     fn redraw_input(&mut self) {
         let line = format!("{}{}", self.prompt, self.input);
+        let prompt_len = self.prompt.chars().count();
+        // Clear this whole line
         for i in 0..WIDTH {
             let offset = 2 * (self.cursor_y * WIDTH + i);
             unsafe {
@@ -114,23 +119,99 @@ impl Terminal {
                 }
             }
         }
-        self.cursor_x = line.len();
+        // New: set VGA cursor to column = prompt.len() + cursor logical pos in input
+        // To correctly place for unicode: count chars, but input_cursor is counted in bytes,
+        // so we must count chars up to input_cursor bytes.
+        let input_cursor_char_idx = self.input[..self.input_cursor].chars().count();
+        self.cursor_x = prompt_len + input_cursor_char_idx;
         self.move_cursor();
     }
 
+    /// Insert a char at input_cursor
     fn push(&mut self, c: char) {
-        self.input.push(c);
+        // Prevent line break in the terminal input line
+        if c == '\n' || c == '\r' {
+            return;
+        }
+        // Insert at cursor position
+        let mut s = self.input.clone();
+        let input_byte_pos = self.input_cursor;
+        s.insert(input_byte_pos, c);
+        self.input = s;
+        self.input_cursor += c.len_utf8();
         self.redraw_input();
     }
 
+    /// Delete the char before input_cursor (backspace)
     fn pop(&mut self) {
-        if self.input.pop().is_some() {
+        if self.input_cursor == 0 {
+            // nothing to do
+            return;
+        }
+        // Find previous char boundary (unicode-safe)
+        let prev = self.input[..self.input_cursor].char_indices().rev().next();
+        if let Some((idx, _ch)) = prev {
+            let mut s = self.input.clone();
+            s.drain(idx..self.input_cursor);
+            self.input = s;
+            self.input_cursor = idx;
             self.redraw_input();
         }
     }
 
+    /// Delete the char at cursor position (Delete key)
+    fn del_forward(&mut self) {
+        // Find next char boundary
+        let next = self.input[self.input_cursor..].char_indices().nth(0);
+        if let Some((rel_idx, ch)) = next {
+            let byte_start = self.input_cursor + rel_idx;
+            let byte_end = byte_start + ch.len_utf8();
+            let mut s = self.input.clone();
+            s.drain(byte_start..byte_end);
+            self.input = s;
+            self.redraw_input();
+        }
+    }
+
+    /// Move cursor left by one char (if possible)
+    fn move_input_cursor_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let prev = self.input[..self.input_cursor].char_indices().rev().next();
+        if let Some((idx, _ch)) = prev {
+            self.input_cursor = idx;
+            self.redraw_input();
+        }
+    }
+
+    /// Move cursor right by one char (if possible)
+    fn move_input_cursor_right(&mut self) {
+        if self.input_cursor >= self.input.len() {
+            return;
+        }
+        let next = self.input[self.input_cursor..].char_indices().next();
+        if let Some((idx, ch)) = next {
+            self.input_cursor += idx + ch.len_utf8();
+            self.redraw_input();
+        }
+    }
+
+    /// Move cursor to beginning (Home key)
+    fn move_input_cursor_home(&mut self) {
+        self.input_cursor = 0;
+        self.redraw_input();
+    }
+
+    /// Move cursor to end (End key)
+    fn move_input_cursor_end(&mut self) {
+        self.input_cursor = self.input.len();
+        self.redraw_input();
+    }
+
     fn clear_input(&mut self) {
         self.input.clear();
+        self.input_cursor = 0;
         self.redraw_input();
     }
 
@@ -141,6 +222,7 @@ impl Terminal {
     fn set_input(&mut self, s: &str) {
         self.input.clear();
         self.input.push_str(s);
+        self.input_cursor = self.input.len();
         self.redraw_input();
     }
 
@@ -228,14 +310,25 @@ pub async fn katalyst_repl() {
                     if let Some(key) = keyboard.process_keyevent(key_event) {
                         match key {
                             DecodedKey::Unicode(c) => match c {
-                                '\n' | '\r' => { term.cursor_x = 0; term.cursor_y += 1; term.move_cursor(); break; }
+                                '\n' | '\r' => { 
+                                    term.cursor_x = 0; 
+                                    term.cursor_y += 1; 
+                                    term.move_cursor(); 
+                                    break; 
+                                }
                                 '\t' => autocomplete(&mut term, &cwd_path),
                                 '\x08' => term.pop(),
+                                // Control chars are ignored, eg. delete handled as RawKey
                                 _ => term.push(c),
                             },
                             DecodedKey::RawKey(code) => match code {
                                 KeyCode::ArrowUp => term.history_prev(),
                                 KeyCode::ArrowDown => term.history_next(),
+                                KeyCode::ArrowLeft => term.move_input_cursor_left(),
+                                KeyCode::ArrowRight => term.move_input_cursor_right(),
+                                KeyCode::Delete => term.del_forward(),
+                                KeyCode::Home => term.move_input_cursor_home(),
+                                KeyCode::End => term.move_input_cursor_end(),
                                 _ => {}
                             }
                         }
@@ -338,7 +431,17 @@ pub async fn katalyst_repl() {
             }
 
 
-
+            "reverse" | "rev" => {
+                // Accept full line after command as argument, properly reversing multi-word phrases
+                let rest_of_line = input.trim_start_matches(command).trim();
+                if !rest_of_line.is_empty() {
+                    let reversed: String = rest_of_line.chars().rev().collect();
+                    term.write_str(&reversed);
+                    term.write_str("\n");
+                } else {
+                    term.write_str("Usage: reverse <text>\n");
+                }
+            }
 
 
             "->" => {
@@ -428,7 +531,10 @@ fn autocomplete(term: &mut Terminal, cwd_path: &[&'static str]) {
     if candidates.len() == 1 {
         let completed = &candidates[0];
         let sep = if prefix.is_empty() { "" } else { " " };
-        term.set_input(&format!("{}{}{}", prefix.trim_end(), sep, completed));
+        // Insert at cursor if typing in the middle
+        let replacement = format!("{}{}{}", prefix.trim_end(), sep, completed);
+        // Save input_cursor position from the prefix length (for now, just set to end)
+        term.set_input(&replacement);
     }
 }
 
