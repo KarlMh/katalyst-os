@@ -190,8 +190,46 @@ impl<'a> Scribe<'a> {
 
         self.redraw();
     }
+
     
-    
+    fn cmd_cut(&mut self, cmd: &str) {
+        let rest = cmd.trim_start_matches("&x").trim();
+        let parts: Vec<&str> = rest.split("->").collect();
+        if parts.len() == 2 {
+            let start = parts[0].trim().parse::<usize>().unwrap_or(0);
+            let end = parts[1].trim().parse::<usize>().unwrap_or(0);
+            if start > 0 && end > 0 && start <= end && end <= self.lines.len() {
+                self.clipboard = self.lines[start-1..end].to_vec();
+                for _ in start-1..end { self.lines.remove(start-1); }
+                self.notify(&format!("\nCut lines {} -> {}\n", start, end));
+            } else {
+                self.notify("\nInvalid range\n");
+            }
+        } else {
+            self.notify("\nUsage: &x N->M\n");
+        }
+    }
+
+
+    fn cmd_search(&mut self, cmd: &str) {
+        let query = cmd.trim_start_matches("&s").trim();
+        if query.is_empty() {
+            self.notify("\nUsage: &s query\n");
+            return;
+        }
+
+        for (i, line) in self.lines.iter().enumerate() {
+            if line.contains(query) {
+                self.cur_line = i;
+                self.cur_col_char = line.find(query).unwrap_or(0);
+                self.redraw();
+                self.notify(&format!("\nFound '{}' at line {}\n", query, i+1));
+                return;
+            }
+        }
+        self.notify(&format!("\n'{}' not found\n", query));
+    }
+
 
     fn save_and_quit(&mut self, cwd_path: &mut Vec<&'static str>) {
         let mut root = ROOT_DIR.lock();
@@ -233,12 +271,11 @@ impl<'a> Scribe<'a> {
                                         line.replace_range(pos.., "");           // remove command from text
                                                                                   // now cmd is independent
                                         match cmd.as_str() {
-                                            "&q" => {
-                                                self.save_and_quit(cwd_path);
-                                                return true;
-                                            }
+                                            "&q" => { self.save_and_quit(cwd_path); return true; }
                                             c if c.starts_with("&c") => self.cmd_copy(&cmd),
+                                            c if c.starts_with("&x") => self.cmd_cut(&cmd),
                                             "&p" => self.cmd_paste(),
+                                            c if c.starts_with("&s") => self.cmd_search(&cmd),
                                             _ => self.notify("\nUnknown command\n"),
                                         }
                                     
