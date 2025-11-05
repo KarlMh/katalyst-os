@@ -21,6 +21,10 @@ use alloc::vec;
 
 use crate::terminal::Terminal;
 
+
+
+
+
 /// Main REPL
 pub async fn katalyst_repl() {
     let mut scancodes = ScancodeStream::new();

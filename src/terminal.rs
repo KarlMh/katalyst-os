@@ -15,6 +15,7 @@ use crate::fs::dir::Directory;
 use crate::scribe::Scribe;
 
 use crate::alloc::string::ToString;
+use crate::vga_buffer::{Color, ColorCode, ScreenChar};
 
 use alloc::format;
 use alloc::vec;
@@ -276,5 +277,42 @@ impl Terminal {
             }
         }
     }
+
+    pub(crate) fn write_colored_char(&mut self, c: char, color: ColorCode) {
+        if c == '\n' {
+            self.cursor_x = 0;
+            self.cursor_y += 1;
+            if self.cursor_y >= HEIGHT {
+                self.scroll_up();
+                self.cursor_y = HEIGHT - 1;
+            }
+            self.move_cursor();
+            return;
+        }
+
+        let row = self.cursor_y;
+        let col = self.cursor_x;
+
+        if col >= WIDTH { return; }
+
+        let offset = 2 * (row * WIDTH + col); // keep *2 for u8 buffer
+        unsafe {
+            VGA_BUFFER.add(offset).write_volatile(c as u8);
+            VGA_BUFFER.add(offset + 1).write_volatile(color.value());
+        }
+
+        self.cursor_x += 1;
+        if self.cursor_x >= WIDTH {
+            self.cursor_x = 0;
+            self.cursor_y += 1;
+            if self.cursor_y >= HEIGHT {
+                self.scroll_up();
+                self.cursor_y = HEIGHT - 1;
+            }
+        }
+        self.move_cursor();
+    }
+
+
 }
 

@@ -12,6 +12,8 @@ use futures_util::StreamExt;
 use alloc::vec;
 use alloc::format;
 
+use crate::vga_buffer::{Color, ColorCode, ScreenChar};
+
 
 const WIDTH: usize = 80;
 const HEIGHT: usize = 25;
@@ -26,6 +28,8 @@ pub struct Scribe<'a> {
     pub top_line: usize,
     pub clipboard: Vec<String>,
     pub dirty_output: bool,
+    pub line_number_width: usize,
+
 }
 
 impl<'a> Deref for Scribe<'a> {
@@ -73,6 +77,7 @@ impl<'a> Scribe<'a> {
             top_line: 0,
             clipboard: Vec::new(),
             dirty_output: false,
+            line_number_width: 3,
         }
     }
 
@@ -84,43 +89,93 @@ impl<'a> Scribe<'a> {
         s[..byte_idx.min(s.len())].chars().count()
     }
 
-    fn redraw(&mut self) {
+
+    
+
+    pub fn redraw(&mut self) {
         self.clear_screen();
         let total = self.lines.len();
+        let needed_digits = total.to_string().len();
+        if needed_digits > self.line_number_width {
+            self.line_number_width = needed_digits;
+        }
+        let num_digits = self.line_number_width;
+
+        let gray = ColorCode::new(Color::LightGray, Color::Black);  // line numbers
+        let white = ColorCode::new(Color::White, Color::Black);      // normal text
+        let blue = ColorCode::new(Color::LightBlue, Color::Black);   // command text
+
         for i in 0..HEIGHT {
             let idx = self.top_line + i;
             if idx >= total { break; }
-            let line = self.lines[idx].clone();
-            for c in line.chars().take(WIDTH) {
-                self.write_char(c);
+
+            // Line number (right-aligned)
+            let line_num = format!("{:>width$}", idx + 1, width = num_digits);
+            for c in line_num.chars() {
+                self.term.write_colored_char(c, gray);
             }
 
-            self.write_char('\n');
+            // Separator
+            self.term.write_colored_char(' ', gray);
+            self.term.write_colored_char(' ', gray);
+
+            let line = &self.lines[idx];
+
+            // Determine command end (space or end-of-line)
+            let mut split_index = line.len();
+            if line.starts_with('&') {
+                if let Some(pos) = line.find(' ') {
+                    split_index = pos; // end of command keyword
+                }
+            }
+
+            for (j, c) in line.chars().enumerate() {
+                let color = if j < split_index && line.starts_with('&') {
+                    blue
+                } else {
+                    white
+                };
+                self.term.write_colored_char(c, color);
+            }
+
+            self.term.write_colored_char('\n', white);
         }
     }
+
+
+
+    fn parse_line_range(input: &str) -> Option<(usize, usize)> {
+        let input = input.trim();
+        if input.is_empty() {
+            return None;
+        }
+
+        // Try splitting by "->"
+        let parts: Vec<&str> = input.split("->").collect();
+
+        if parts.len() == 1 {
+            // Single line number
+            if let Ok(n) = parts[0].trim().parse::<usize>() {
+                return Some((n, n));
+            }
+        } else if parts.len() == 2 {
+            // Range with possible spaces
+            if let (Ok(start), Ok(end)) = (parts[0].trim().parse::<usize>(), parts[1].trim().parse::<usize>()) {
+                return Some((start, end));
+            }
+        }
+
+        None
+    }
+
+
+
 
     fn notify(&mut self, msg: &str) {
         self.clear_screen();
         self.redraw();
         self.write_str(msg);
         self.dirty_output = true;
-    }
-
-    fn cmd_copy(&mut self, cmd: &str) {
-        let rest = cmd.trim_start_matches("&c").trim();
-        let parts: Vec<&str> = rest.split("->").collect();
-        if parts.len() == 2 {
-            let start = parts[0].trim().parse::<usize>().unwrap_or(0);
-            let end = parts[1].trim().parse::<usize>().unwrap_or(0);
-            if start > 0 && end > 0 && start <= end && end <= self.lines.len() {
-                self.clipboard = self.lines[start - 1..end].to_vec();
-                self.notify(&format!("\nCopied lines {} -> {}\n", start, end));
-            } else {
-                self.notify("\nInvalid range\n");
-            }
-        } else {
-            self.notify("\nUsage: &c N->M\n");
-        }
     }
     
     fn cmd_paste(&mut self) {
@@ -174,7 +229,7 @@ impl<'a> Scribe<'a> {
             self.cur_col_char += 1;
         } else if pairs.iter().any(|&(_, close)| close == c) {
             // Skip over existing closing character if it's the same
-            if self.lines[self.cur_line][byte_idx..].chars().next() == Some(c) {
+            if self.lines[self.cur_line].get(byte_idx..).and_then(|s| s.chars().next()) == Some(c){
                 self.cur_col_char += 1;
             } else {
                 s.insert_str(byte_idx, &c.to_string());
@@ -194,21 +249,46 @@ impl<'a> Scribe<'a> {
     
     fn cmd_cut(&mut self, cmd: &str) {
         let rest = cmd.trim_start_matches("&x").trim();
-        let parts: Vec<&str> = rest.split("->").collect();
-        if parts.len() == 2 {
-            let start = parts[0].trim().parse::<usize>().unwrap_or(0);
-            let end = parts[1].trim().parse::<usize>().unwrap_or(0);
+        if let Some((start, end)) = Self::parse_line_range(rest) {
             if start > 0 && end > 0 && start <= end && end <= self.lines.len() {
                 self.clipboard = self.lines[start-1..end].to_vec();
-                for _ in start-1..end { self.lines.remove(start-1); }
+
+                // Remove from end to start to avoid shifting
+                for i in (start-1..end).rev() {
+                    self.lines.remove(i);
+                }
+
+                if self.lines.is_empty() {
+                    self.lines.push(String::new());
+                    self.cur_line = 0;
+                } else {
+                    self.cur_line = self.cur_line.min(self.lines.len() - 1);
+                }
+                self.cur_col_char = 0;
+
                 self.notify(&format!("\nCut lines {} -> {}\n", start, end));
             } else {
                 self.notify("\nInvalid range\n");
             }
         } else {
-            self.notify("\nUsage: &x N->M\n");
+            self.notify("\nUsage: &x N or &x N->M\n");
         }
     }
+
+    fn cmd_copy(&mut self, cmd: &str) {
+        let rest = cmd.trim_start_matches("&c").trim();
+        if let Some((start, end)) = Self::parse_line_range(rest) {
+            if start > 0 && end > 0 && start <= end && end <= self.lines.len() {
+                self.clipboard = self.lines[start-1..end].to_vec();
+                self.notify(&format!("\nCopied lines {} -> {}\n", start, end));
+            } else {
+                self.notify("\nInvalid range\n");
+            }
+        } else {
+            self.notify("\nUsage: &c N or &c N->M\n");
+        }
+    }
+
 
 
     fn cmd_search(&mut self, cmd: &str) {
@@ -285,14 +365,25 @@ impl<'a> Scribe<'a> {
                                     }
 
                                     // Normal line break insertion for non-command text
-                                    let byte_idx = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char);
-                                    let cur = self.lines[self.cur_line].clone();
-                                    let (left, right) = cur.split_at(byte_idx);
-                                    self.lines[self.cur_line] = left.to_string();
-                                    self.lines.insert(self.cur_line + 1, right.to_string());
+                                    let line = &mut self.lines[self.cur_line];
+                                    let byte_idx = Self::char_to_byte_idx(line, self.cur_col_char);
+
+                                    let (left, right) = {
+                                        let s = &line[..];
+                                        let left = s.get(..byte_idx).unwrap_or("").to_string();
+                                        let right = s.get(byte_idx..).unwrap_or("").to_string();
+                                        (left, right)
+                                    };
+
+                                    // Replace current line with left
+                                    *line = left;
+
+                                    // Insert right as new line
+                                    self.lines.insert(self.cur_line + 1, right);
                                     self.cur_line += 1;
                                     self.cur_col_char = 0;
                                     self.redraw();
+
                                 }
 
 
@@ -300,7 +391,10 @@ impl<'a> Scribe<'a> {
                                     if self.cur_col_char > 0 {
                                         let byte_idx = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char);
                                         let prev_byte = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char - 1);
-                                        self.lines[self.cur_line].drain(prev_byte..byte_idx);
+                                        if let Some(slice) = self.lines[self.cur_line].get(prev_byte..byte_idx) {
+                                            self.lines[self.cur_line].replace_range(prev_byte..byte_idx, "");
+                                        }
+
                                         self.cur_col_char -= 1;
                                     } else if self.cur_line > 0 {
                                         let prev_len = self.lines[self.cur_line - 1].chars().count();
@@ -372,13 +466,16 @@ impl<'a> Scribe<'a> {
                                 if self.cur_col_char < len {
                                     let bstart = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char);
                                     let bend = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char + 1);
-                                    self.lines[self.cur_line].drain(bstart..bend);
+                                    if let Some(_) = self.lines[self.cur_line].get(bstart..bend) {
+                                        self.lines[self.cur_line].replace_range(bstart..bend, "");
+                                    }
                                 } else if self.cur_line + 1 < self.lines.len() {
                                     let next = self.lines.remove(self.cur_line + 1);
                                     self.lines[self.cur_line].push_str(&next);
                                 }
                                 self.redraw();
                             }
+
                             KeyCode::Home => { self.cur_col_char = 0; }
                             KeyCode::End => { self.cur_col_char = self.lines[self.cur_line].chars().count(); }
                             _ => {}
@@ -408,12 +505,27 @@ impl<'a> Scribe<'a> {
                 self.redraw();
             }
 
+            let total = self.lines.len();
+            let num_digits = self.line_number_width;
+            let line_offset = num_digits + 2;
+
+
             let rel_line = self.cur_line.saturating_sub(self.top_line);
+
+            // Clamp cur_col_char
+            let line_len = self.lines[self.cur_line].chars().count();
+            self.cur_col_char = self.cur_col_char.min(line_len);
+
+
             let byte_idx = Self::char_to_byte_idx(&self.lines[self.cur_line], self.cur_col_char);
             let col = Self::byte_idx_to_char_idx(&self.lines[self.cur_line], byte_idx);
-            self.cursor_x = col;
+
+
+            // Adjust cursor position so it’s after the line number
+            self.cursor_x = line_offset + col;
             self.cursor_y = rel_line;
             self.move_cursor();
+
 
             if self.handle_input(scancodes, keyboard, cwd_path).await {
                 break;
