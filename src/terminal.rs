@@ -27,11 +27,11 @@ const HEIGHT: usize = 25;
 pub struct Terminal {
     pub(crate) cursor_x: usize,  // VGA col
     pub(crate) cursor_y: usize,  // VGA row
-    input: String,    // complete text input content
-    input_cursor: usize, // input cursor pos (bytes, NOT screen pos)
+    pub(crate) input: String,    // complete text input content
+    pub(crate) input_cursor: usize, // input cursor pos (bytes, NOT screen pos)
     pub(crate) prompt: String,
-    history: Vec<String>,
-    hist_pos: Option<usize>,
+    pub(crate) history: Vec<String>,
+    pub(crate) hist_pos: Option<usize>,
 }
 
 impl Terminal {
@@ -107,30 +107,61 @@ impl Terminal {
         }
     }
 
-    /// redraw the prompt+input, with cursor placed at current input_cursor
     pub(crate) fn redraw_input(&mut self) {
-        let line = format!("{}{}", self.prompt, self.input);
-        let prompt_len = self.prompt.chars().count();
-        // Clear this whole line
+        use crate::vga_buffer::{Color, ColorCode};
+    
+        let blue = ColorCode::new(Color::Cyan, Color::Black);
+        let green = ColorCode::new(Color::LightBlue, Color::Black);
+        let white = ColorCode::new(Color::White, Color::Black);
+    
+        // Clear current line
         for i in 0..WIDTH {
             let offset = 2 * (self.cursor_y * WIDTH + i);
             unsafe {
-                if i < line.len() {
-                    VGA_BUFFER.add(offset).write_volatile(line.as_bytes()[i]);
-                    VGA_BUFFER.add(offset+1).write_volatile(0x0f);
-                } else {
-                    VGA_BUFFER.add(offset).write_volatile(b' ');
-                    VGA_BUFFER.add(offset+1).write_volatile(0x0f);
-                }
+                VGA_BUFFER.add(offset).write_volatile(b' ');
+                VGA_BUFFER.add(offset + 1).write_volatile(0x0f);
             }
         }
-        // New: set VGA cursor to column = prompt.len() + cursor logical pos in input
-        // To correctly place for unicode: count chars, but input_cursor is counted in bytes,
-        // so we must count chars up to input_cursor bytes.
+        self.cursor_x = 0;
+    
+        // Split prompt into "katalyst@" and path
+        let prompt_prefix = "katalyst@";
+        let prompt_clone = self.prompt.clone(); // clone to avoid borrow issues
+        let path_and_arrow = prompt_clone.strip_prefix(prompt_prefix).unwrap_or("");
+        let path_only = path_and_arrow.strip_suffix("=> ").unwrap_or(path_and_arrow);
+    
+        // Write colored prompt
+        for (i, c) in prompt_prefix.chars().enumerate() {
+            if i <= 7 { // first 7 chars "katalyst"
+                self.write_colored_char(c, blue);
+            } else { // the '@'
+                self.write_colored_char(c, white);
+            }
+            
+        }
+    
+        for c in path_only.chars() {
+            self.write_colored_char(c, green);
+        }
+        for c in "=> ".chars() {
+            self.write_colored_char(c, white);
+        }
+    
+        // Position where input starts
+        let input_start_x = self.cursor_x;
+    
+        // Clone input to avoid borrow issues
+        let input_clone = self.input.clone();
+        for c in input_clone.chars() {
+            self.write_colored_char(c, white);
+        }
+    
+        // Move cursor to input_cursor position (Unicode-safe)
         let input_cursor_char_idx = self.input[..self.input_cursor].chars().count();
-        self.cursor_x = prompt_len + input_cursor_char_idx;
+        self.cursor_x = input_start_x + input_cursor_char_idx;
         self.move_cursor();
     }
+    
 
     /// Insert a char at input_cursor
     pub(crate) fn push(&mut self, c: char) {

@@ -290,7 +290,6 @@ impl<'a> Scribe<'a> {
     }
 
 
-
     fn cmd_search(&mut self, cmd: &str) {
         let query = cmd.trim_start_matches("&s").trim();
         if query.is_empty() {

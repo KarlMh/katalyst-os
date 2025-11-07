@@ -2,7 +2,7 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use core::fmt::Write;
-
+use crate::println;
 use crate::task::keyboard::ScancodeStream;
 use pc_keyboard::{DecodedKey, Keyboard, ScancodeSet1, layouts, HandleControl, KeyCode};
 use futures_util::stream::StreamExt;
@@ -14,29 +14,43 @@ use crate::fs::storage::ROOT_DIR;
 use crate::fs::dir::Directory;
 use crate::scribe::Scribe;
 
+
 use crate::alloc::string::ToString;
 
 use alloc::format;
 use alloc::vec;
 
 use crate::terminal::Terminal;
-
-
+use crate::vga_buffer::{Color, ColorCode, ScreenChar};
+use alloc::boxed::Box;
 
 
 
 /// Main REPL
 pub async fn katalyst_repl() {
+
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore);
 
     let mut term = Terminal::new("");
     term.clear_screen();
 
-    term.write_str("katalyst v0.1\n");
-    term.write_str("a simple OS kernel, made by kewl.\n\n");
+    term.write_str(r"
 
-    let mut cwd_path: Vec<&'static str> = vec!["main"];
+               __              __           .__                     __   
+              |  | _______   _/  |_ _____   |  |   ___.__.  _______/  |_ 
+              |  |/ /\__  \  \   __\\__  \  |  |  <   |  | /  ___/\   __\
+              |    <  / __ \_ |  |   / __ \_|  |__ \___  | \___ \  |  |  
+              |__|_ \(____  / |__|  (____  /|____/ / ____|/____  > |__|  
+                   \/     \/             \/        \/          \/      
+                          K   A   T   A   L   Y   S   T 
+                              Built for Pure Focus.          
+                                      v0.1
+
+   ");
+   
+
+    let mut cwd_path: Vec<&'static str> = vec!["home"];
     let mut last_autosave_ticks: u64 = 0;
 
     loop {
@@ -73,15 +87,33 @@ pub async fn katalyst_repl() {
                                 _ => term.push(c),
                             },
                             DecodedKey::RawKey(code) => match code {
-                                KeyCode::ArrowUp => term.history_prev(),
-                                KeyCode::ArrowDown => term.history_next(),
+                                KeyCode::F2 => {
+                                    // insert "->" at cursor position
+                                    let mut s = term.input.clone();
+                                    s.insert_str(term.input_cursor, "->");
+                                    term.input = s;
+                                    term.input_cursor += 2;
+                                    term.redraw_input();
+                                }
+                                KeyCode::F3 => {
+                                    // insert "<-" at cursor position
+                                    let mut s = term.input.clone();
+                                    s.insert_str(term.input_cursor, "<-");
+                                    term.input = s;
+                                    term.input_cursor += 2;
+                                    term.redraw_input();
+                                }
+                                // existing keys
                                 KeyCode::ArrowLeft => term.move_input_cursor_left(),
                                 KeyCode::ArrowRight => term.move_input_cursor_right(),
+                                KeyCode::ArrowUp => term.history_prev(),
+                                KeyCode::ArrowDown => term.history_next(),
                                 KeyCode::Delete => term.del_forward(),
                                 KeyCode::Home => term.move_input_cursor_home(),
                                 KeyCode::End => term.move_input_cursor_end(),
                                 _ => {}
                             }
+                            
                         }
                     }
                 }
@@ -89,10 +121,54 @@ pub async fn katalyst_repl() {
         }
 
         let input = term.get_input().trim().to_string();
+
+        // Skip empty input (nothing typed or just spaces)
+        if input.is_empty() {
+            continue; // go back to the top of the REPL loop
+        }
+        
         term.history_push(&input);
         let mut parts = input.split_whitespace();
         let command = parts.next().unwrap_or("");
         let arg = parts.next();
+
+
+        if input.starts_with("->") {
+            let rest_of_line = input.trim_start_matches("->").trim();
+            if rest_of_line.is_empty() {
+                term.write_str("Usage: -> <dir>\n");
+                continue;
+            }
+        
+            let root = ROOT_DIR.lock();
+            // Start from cwd, not always root
+            let mut temp = resolve_cwd(&root, &cwd_path);
+            let mut path_stack = cwd_path.clone(); // keep current cwd
+        
+            // split by '/' for nested paths
+            let parts: Vec<&str> = rest_of_line.split('/').filter(|s| !s.is_empty()).collect();
+            let mut success = true;
+        
+            for part in parts.iter() {
+                if let Some(child) = temp.subdirs.get(part) {
+                    temp = child;
+                    path_stack.push(child.name);
+                } else {
+                    term.write_str(&format!("Directory '{}' not found\n", part));
+                    success = false;
+                    break;
+                }
+            }
+        
+            if success {
+                cwd_path = path_stack;
+            }
+        
+            continue;
+        }
+        
+        
+        
 
         match command {
             "help" => {
@@ -114,7 +190,24 @@ pub async fn katalyst_repl() {
             "wipe" | "wp" => term.clear_screen(),
             "halt" => crate::sys::halt(&mut term),
             "reboot" => crate::sys::reboot(&mut term),
-            "spark" => crate::sys::spark(&mut term),
+            "spark" => {
+                term.clear_screen();
+                term.write_str(r"
+
+               __              __           .__                     __   
+              |  | _______   _/  |_ _____   |  |   ___.__.  _______/  |_ 
+              |  |/ /\__  \  \   __\\__  \  |  |  <   |  | /  ___/\   __\
+              |    <  / __ \_ |  |   / __ \_|  |__ \___  | \___ \  |  |  
+              |__|_ \(____  / |__|  (____  /|____/ / ____|/____  > |__|  
+                   \/     \/             \/        \/          \/      
+                          K   A   T   A   L   Y   S   T 
+                              Built for Pure Focus.          
+                                      v0.1
+ 
+    ");
+
+            }
+
             "core" => crate::sys::core_report(&mut term),
             "save" => {
                 term.write_str("Saving...\n");
@@ -180,6 +273,31 @@ pub async fn katalyst_repl() {
                 }
             }
 
+            "parse" => {
+                if let Some(name) = arg {
+                    let root = ROOT_DIR.lock();
+                    let cwd = resolve_cwd(&root, &cwd_path);
+
+                    if let Some(file) = cwd.files.get(name) {
+                        let nodes = crate::fs::ink::parse_ink(file);
+                        crate::fs::ink::render_ink_vga(&mut term, &nodes);
+                    } else {
+                        term.write_str("File not found.\n");
+                    }
+                } else {
+                    term.write_str("Usage: parse <file>\n");
+                }
+            }
+
+
+
+
+
+
+
+
+
+
 
             "seek" => {
                 if let Some(pattern) = arg {
@@ -203,42 +321,23 @@ pub async fn katalyst_repl() {
             }
 
 
-            "->" => {
-                if let Some(target) = arg {
-                    let root = ROOT_DIR.lock();
-                    let mut temp = &*root;
-                    let mut path_stack = vec![temp.name];
-                    let trimmed = target.trim_start_matches([' ', '/'].as_ref());
-                    if trimmed.is_empty() {
-                        return;
-                    }
-                    let parts: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
-                    let mut success = true;
-                    for part in parts.iter() {
-                        if let Some(child) = temp.subdirs.get(part) {
-                            temp = child;
-                            path_stack.push(child.name);
-                        } else {
-                            term.write_str(&format!("Directory '{}' not found\n", part));
-                            success = false;
-                            break;
-                        }
-                    }
-                    if success { cwd_path = path_stack; }
-                } else {
-                    term.write_str("Usage: -> <dir>\n");
-                }
-            },
+
+
+
 
             "<-" => {
-                if cwd_path.len() > 1 {
+                let rest_of_line = input.trim_start_matches(command).trim();
+                if !rest_of_line.is_empty() {
+                    term.write_str("Usage: <- takes no arguments\n");
+                } else if cwd_path.len() > 1 {
                     cwd_path.pop();
                 } else {
                     term.write_str("Already at root\n");
                 }
-            },
+            }
 
 
+            
             _ => term.write_str("Unknown command\n"),
         }
     }
@@ -264,45 +363,95 @@ pub fn resolve_cwd_mut<'a>(root: &'a mut Directory, cwd_path: &[&'static str]) -
 
 
 
-fn update_prompt(term: &mut Terminal, cwd_path: &[&str]) {
-    term.prompt = format!("katalyst@{}=> ", cwd_path.join("/"));
-    term.redraw_input(); // redraws prompt + current input
+pub fn update_prompt(term: &mut Terminal, cwd_path: &[&str]) {
+    // Store plain-text version of prompt for input handling
+    term.prompt = format!("katalyst@/{}=> ", cwd_path.join("/"));
+
+    // Immediately redraw input after updating prompt
+    term.redraw_input();
 }
 
-// Simple autocomplete: complete last token from command/file/dir names
 fn autocomplete(term: &mut Terminal, cwd_path: &[&'static str]) {
     let input = term.get_input().to_string();
-    let parts: Vec<&str> = input.split_whitespace().collect();
-    let (prefix, token) = if let Some(last) = parts.last() {
-        let start = input.rfind(last).unwrap_or(0);
-        (input[..start].to_string(), (*last).to_string())
+
+    // Determine start of last token (space or start of line)
+    let token_start = input.rfind(|c: char| c == ' ' || c == '\t').map(|i| i + 1).unwrap_or(0);
+    let token_slice = &input[token_start..];
+
+    // Detect special prefixes for navigation
+    let (token_prefix, token) = if token_slice.starts_with("->") {
+        ("->", &token_slice[2..])
+    } else if token_slice.starts_with("<-") {
+        ("<-", &token_slice[2..])
     } else {
-        (String::new(), String::new())
+        ("", token_slice)
     };
 
+    // Keep everything before the token (used for replacement)
+    let prefix = &input[..token_start];
+
     let mut candidates: Vec<String> = Vec::new();
-    // commands
-    let cmds = ["help","halt","reboot","spark","core","save","load","here","make","del","peek","void","scribe","seek","->","<-"];
-    for c in cmds.iter() { if c.starts_with(&token) { candidates.push((*c).to_string()); } }
-    // files/dirs in cwd
+
+    // 1. All commands
+    let cmds = [
+        "help","halt","reboot","spark","core","save","load","here",
+        "make","del","peek","void","scribe","seek","reverse",
+        "->","<-","wipe","parse"
+    ];
+    for c in cmds.iter() {
+        if c.starts_with(token) {
+            candidates.push((*c).to_string());
+        }
+    }
+
+    // 2. Files & directories in the current working directory
     let root = ROOT_DIR.lock();
     let cwd = resolve_cwd(&root, cwd_path);
-    for (name, _) in cwd.files.iter() { if name.starts_with(&token) { candidates.push((*name).to_string()); } }
-    for (name, _) in cwd.subdirs.iter() { if name.starts_with(&token) { candidates.push((*name).to_string()); } }
+    for (name, _) in cwd.files.iter() {
+        if name.starts_with(token) {
+            candidates.push((*name).to_string());
+        }
+    }
+    for (name, _) in cwd.subdirs.iter() {
+        if name.starts_with(token) {
+            candidates.push((*name).to_string());
+        }
+    }
 
+    // 3. Nested path autocompletion for -><dir>/<subdir>
+    if token_prefix == "->" && token.contains('/') {
+        let mut path_parts: Vec<&str> = token.split('/').collect();
+        let last_part = path_parts.pop().unwrap_or("");
+        let mut temp = resolve_cwd(&root, cwd_path);
+        let mut valid_path = true;
+
+        // Traverse all but the last part
+        for part in &path_parts {
+            if let Some(sub) = temp.subdirs.get(*part) {
+                temp = sub;
+            } else {
+                valid_path = false;
+                break;
+            }
+        }
+
+        if valid_path {
+            for (name, _) in temp.subdirs.iter() {
+                if name.starts_with(last_part) {
+                    let completed_path = if path_parts.is_empty() {
+                        format!("{}{}", token_prefix, name)
+                    } else {
+                        format!("{}{}{}", token_prefix, path_parts.join("/"), format!("/{}", name))
+                    };
+                    candidates.push(completed_path);
+                }
+            }
+        }
+    }
+
+    // Only autocomplete if exactly one candidate exists
     if candidates.len() == 1 {
-        let completed = &candidates[0];
-        let sep = if prefix.is_empty() { "" } else { " " };
-        // Insert at cursor if typing in the middle
-        let needs_space = !input.ends_with(' ');
-        let replacement = if needs_space {
-            format!("{}{}{} ", prefix.trim_end(), sep, completed)
-        } else {
-            format!("{}{}{}", prefix.trim_end(), sep, completed)
-        };
-
-        // Save input_cursor position from the prefix length (for now, just set to end)
+        let replacement = format!("{}{}{} ", prefix, token_prefix, candidates[0].trim_start_matches(token_prefix));
         term.set_input(&replacement);
     }
 }
-

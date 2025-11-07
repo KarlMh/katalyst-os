@@ -2,11 +2,22 @@ use super::dir::Directory;
 use alloc::vec::Vec;
 use spin::Mutex;
 use lazy_static::lazy_static;
+use alloc::boxed::Box;
 
 /// Root directory
 lazy_static! {
-    pub static ref ROOT_DIR: Mutex<Directory> = Mutex::new(Directory::new("main"));
+    pub static ref ROOT_DIR: Mutex<Directory> = Mutex::new({
+        let mut root = Directory::new("home"); // home is root
+
+        for &name in ["docs", "downloads", "media", "vault", "logs"].iter() {
+            root.subdirs.insert(name, Box::new(Directory::new(name)));
+        }
+
+        root
+    });
 }
+
+
 
 
 /// Simple "disk" simulation
